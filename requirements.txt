@@ -1,0 +1,7 @@
+telethon
+Pillow
+requests
+python-dotenv
+cryptography
+aiohttp
+beautifulsoup4
