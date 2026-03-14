@@ -63,26 +63,14 @@ def get_user_title(count):
 
 # --- 3. دالة التحقق من الصلاحيات والرتب ---
 async def check_privilege(event, required_rank):
-    """تتحقق مما إذا كان المستخدم يملك الرتبة المطلوبة لتنفيذ الأمر"""
-    if event.sender_id == OWNER_ID:
-        return True
-    
-    # جلب رتبة العضو من قاعدة البيانات
+    """التحقق الملكي: يربط الرتبة بالمجموعة الحالية"""
+    if event.sender_id == OWNER_ID: return True
     current_gid = str(event.chat_id)
+    # جلب الرتبة بناءً على (المجموعة واليوزر) معاً
     user_rank = db.get_rank(current_gid, event.sender_id)
-    
-    # ترتيب القوة للرتب
-    ranks_order = {
-        "عضو": 0, 
-        "مميز": 1, 
-        "ادمن": 2, 
-        "مدير": 3, 
-        "مالك": 4, 
-        "المنشئ": 5
-    }
-    
+    ranks_order = {"عضو": 0, "مميز": 1, "ادمن": 2, "مدير": 3, "مالك": 4, "المنشئ": 5}
     return ranks_order.get(user_rank, 0) >= ranks_order.get(required_rank, 0)
-
+    
 # --- 4. نظام الردود الملكية والذكية (الردود التلقائية) ---
 @client.on(events.NewMessage(chats=ALLOWED_GROUPS))
 async def reactive_replies(event):
@@ -289,113 +277,62 @@ async def main_handler(event):
     # --- ميزة مسح الردود دفعة واحدة ---
     if message == "مسح الردود":
         try:
-            db.cursor.execute("DELETE FROM replies WHERE chat_id = ?", (chat_id,))
+            db.cursor.execute("DELETE FROM replies WHERE gid = ? AND word = ?", (chat_id, response_word.text))
             db.conn.commit()
         except:
             db.cursor.execute("DELETE FROM replies WHERE gid = ?", (chat_id,))
             db.conn.commit()
         await event.reply("🗑️ **تم مسح كافة الردود المبرمجة لهذه المجموعة بنجاح.**")
 
-            # --- [7] نظام التحكم الشامل والمصحح (نسخة الأمان السامي لـ أنس) ---
+            
+    # --- [7] نظام التحكم الشامل والمصحح (نسخة الأمان السامي لـ أنس) ---
     parts = message.split()
+    cmd = parts[0] if parts else ""
     target_id = None
     target_user_name = "المستخدم"
 
-    # 1. تحديد الهدف (رد، يوزر، آيدي)
+    # 1. تحديد الهدف الذكي
     if event.is_reply:
         target_msg = await event.get_reply_message()
-        if target_msg: 
-            target_id = target_msg.sender_id
-            try:
-                u_ent = await client.get_entity(target_id)
-                target_user_name = u_ent.first_name
+        if target_msg: target_id = target_msg.sender_id
+    elif len(parts) > 1:
+        if parts[1].isdigit(): target_id = int(parts[1])
+        elif parts[1].startswith("@"):
+            try: target_id = (await client.get_entity(parts[1])).id
             except: pass
-    else:
-        for part in parts:
-            if part.startswith("@"):
-                try:
-                    user_entity = await client.get_entity(part)
-                    target_id = user_entity.id
-                    target_user_name = user_entity.first_name
-                    break
-                except: continue
-            elif part.isdigit() and len(part) > 5:
-                target_id = int(part)
-                try:
-                    u_ent = await client.get_entity(target_id)
-                    target_user_name = u_ent.first_name
-                except: pass
-                break
 
     if target_id:
-        # حماية المقام السامي (أنس)
+        # حماية المطور
         if target_id == OWNER_ID and sender_id != OWNER_ID:
-            await event.respond("⚠️ **توقف!** محاولة المساس بالسلطات العليا للمطور أنس مرفوضة. تم تسجيل المحاولة.")
+            await event.respond("⚠️ **توقف!** لا يمكن المساس بالمقام السامي للمطور أنس.")
             return
 
-        clean_cmd = " ".join([p for p in parts if not p.isdigit() and not p.startswith("@")])
-        
-        # جلب الرتب للمقارنة (تطبيق الهرم)
-        my_rank_val = db.get_rank_value(str(sender_id)) # سنعتمد الرتبة العابرة للمجموعات
-        target_rank_val = db.get_rank_value(str(target_id))
+        # جلب القيم الرقمية للرتب للمقارنة الهرمية
+        my_rank_val = db.get_rank_value(chat_id, sender_id)
+        target_rank_val = db.get_rank_value(chat_id, target_id)
 
-        # --- قسم الرتب (الرفع والتنزيل الهرمي) ---
+        # الرفع والتنزيل الشامل للمجموعات
         rank_map = {"رفع مالك": "مالك", "رفع مدير": "مدير", "رفع ادمن": "ادمن", "رفع مميز": "مميز"}
-        
-        if clean_cmd in rank_map:
-            new_rank = rank_map[clean_cmd]
-            new_rank_val = {"مالك": 4, "مدير": 3, "ادمن": 2, "مميز": 1}.get(new_rank, 0)
+        if cmd in rank_map or " ".join(parts[:2]) in rank_map:
+            new_rank = rank_map.get(cmd) or rank_map.get(" ".join(parts[:2]))
+            new_val = {"مالك": 4, "مدير": 3, "ادمن": 2, "مميز": 1}.get(new_rank, 0)
             
-            # تطبيق قانون الهرم: لا ترفع رتبة أعلى منك أو تساويك
-            if sender_id != OWNER_ID and my_rank_val <= new_rank_val:
-                await event.respond("❌ ليس لديك صلاحية لرفع هذه الرتبة.")
+            if sender_id != OWNER_ID and my_rank_val <= new_val:
+                await event.respond("❌ لا تملك صلاحية لرفع هذه الرتبة.")
                 return
             
-            # تنفيذ الرفع على مستوى كل المجموعات (Cross-Group)
             for gid in ALLOWED_GROUPS:
                 db.set_rank(str(gid), target_id, new_rank)
-            await event.respond(f"👑 تم منح رتبة **{new_rank}** لـ {target_user_name} في كافة الممالك.")
+            await event.respond(f"👑 تم منح رتبة **{new_rank}** لـ {target_user_name} في كل الممالك.")
 
-        elif clean_cmd == "تنزيل":
+        elif cmd == "تنزيل":
             if sender_id != OWNER_ID and my_rank_val <= target_rank_val:
                 await event.respond("❌ لا يمكنك تنزيل من هو برتبتك أو أعلى منك.")
                 return
             for gid in ALLOWED_GROUPS:
                 db.set_rank(str(gid), target_id, "عضو")
-            await event.respond(f"📉 تم تنزيل {target_user_name} إلى رتبة عضو في كافة الممالك.")
-
-        # --- قسم العقوبات (مسموح للأدمن فما فوق) ---
-        elif clean_cmd == "حظر":
-            if my_rank_val < 2: return # للأدمن فما فوق فقط
-            try:
-                # تغيير من نفي (تقييد رؤية) إلى طرد نهائي (Kick)
-                await client.kick_participant(event.chat_id, target_id)
-                await event.respond(f"✈️ تم طرد {target_user_name} نهائياً من المملكة.")
-            except Exception:
-                await event.respond("❌ فشل الطرد (تأكد أن البوت مشرف ولديه صلاحية طرد المستخدمين).")
-
-
-        elif clean_cmd in ["فك القيود", "رفع التقييد", "رفع الكتم"]:
-            try:
-                await client.edit_permissions(event.chat_id, target_id, send_messages=True, send_media=True)
-                await event.respond(f"✅ تم فك كافة القيود عن {target_user_name}.")
-            except: pass
-
-        elif clean_cmd == "انذار":
-            if my_rank_val < 2: return
-            warn_key = f"warn_global_{target_id}" # إنذار عالمي عابر للمجموعات
-            current_warns = int(db.get_setting(warn_key) or 0) + 1
-            if current_warns >= 3:
-                try:
-                    await client.kick_participant(event.chat_id, target_id)
-                    db.set_setting(warn_key, 0)
-                    await event.respond(f"⚔️ {target_user_name} تجاوز 3 إنذارات وتم طرده.")
-                except: pass
-            else:
-                db.set_setting(warn_key, current_warns)
-                await event.respond(f"⚠️ إنذار ({current_warns}/3) للعضو {target_user_name}.")
-
-
+            await event.respond(f"📉 تم تنزيل {target_user_name} لمرتبة عضو.")
+            
 
         # --- أوامر التفاعل المباشر (بالرد فقط) ---
     # البداية من السطر 401 تقريباً
