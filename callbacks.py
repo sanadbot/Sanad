@@ -1,11 +1,30 @@
 import os
 from telethon import events, Button
 from database import db
-# استيراد العناصر الأساسية من الملف الرئيسي
-from __main__ import client, check_privilege 
 
-# استدعاء المسار الموحد من قاعدة البيانات مباشرة
-PROTECT_DIR = db.base_dir
+# ملاحظة تقنية: استدعاء الكلاينت من الملف الرئيسي
+from __main__ import client
+
+# --- دالة التحقق المحلية لضمان السرعة ومنع التعليق ---
+async def check_callback_privilege(event, required_rank):
+    """التحقق من صلاحية الشخص الذي ضغط على الزر"""
+    from __main__ import OWNER_ID
+    if event.sender_id == OWNER_ID:
+        return True
+    
+    current_gid = str(event.chat_id)
+    user_rank = db.get_rank(current_gid, event.sender_id)
+    
+    ranks_order = {
+        "عضو": 0, 
+        "مميز": 1, 
+        "ادمن": 2, 
+        "مدير": 3, 
+        "مالك": 4, 
+        "المنشئ": 5
+    }
+    
+    return ranks_order.get(user_rank, 0) >= ranks_order.get(required_rank, 0)
 
 @client.on(events.CallbackQuery)
 async def callback_handler(event):
@@ -13,10 +32,9 @@ async def callback_handler(event):
     gid = str(event.chat_id)
     u_id = event.sender_id
     
-    # --- [ تحديث أنس: التحقق الهرمي من ضغطة الزر ] ---
-    # نتحقق من رتبة الشخص الذي ضغط الزر الآن
-    if not await check_privilege(event, "مدير"):
-        await event.answer("⚠️ المقام السامي: هذه الأزرار للمدراء فقط!", alert=True)
+    # 1. التحقق من الرتبة (للمدراء فقط)
+    if not await check_callback_privilege(event, "مدير"):
+        await event.answer("⚠️ عذراً.. هذه اللوحة مخصصة للمدراء فقط!", alert=True)
         return
 
     # --- القائمة الرئيسية ---
@@ -28,7 +46,7 @@ async def callback_handler(event):
         ]
         await event.edit("👑 **لوحة تحكم Monopoly الملكية** 👑\n\nمرحباً بك يا مدير، اختر القسم المراد التحكم به:", buttons=btns)
 
-    # --- نظام الأقفال (تم تحسين سرعة التحديث) ---
+    # --- نظام الأقفال ---
     elif data == "show_locks":
         def get_s(feat): return "🔒" if db.is_locked(gid, feat) else "🔓"
         btns = [
@@ -37,23 +55,32 @@ async def callback_handler(event):
             [Button.inline(f"{get_s('forward')} التوجيه", "tg_forward"), Button.inline(f"{get_s('videos')} الفيديوهات", "tg_videos")],
             [Button.inline("⬅️ رجوع", "show_main")]
         ]
-        await event.edit("🔐 **إعدادات الحماية الفورية:**", buttons=btns)
+        await event.edit("🔐 **إعدادات الحماية الفورية للمجموعة:**", buttons=btns)
 
-    # --- منطق التبديل (الإصلاح لمنع التعليق) ---
+    # --- منطق التبديل (Toggle Logic) ---
     elif data.startswith("tg_"):
         feature = data.replace("tg_", "")
+        
         if feature == "welcome":
             curr = db.get_setting(gid, "welcome_status")
-            db.set_setting(gid, "welcome_status", "off" if curr == "on" else "on")
-            await event.answer("✅ تم تحديث حالة الترحيب")
-            # تحديث الواجهة بدون استدعاء الدالة من جديد
-            w_status = "✅ مفعل" if db.get_setting(gid, "welcome_status") == "on" else "❌ معطل"
-            await event.edit("⚙️ **الإعدادات العامة للبوت:**", buttons=[[Button.inline(f"نظام الترحيب: {w_status}", "tg_welcome")],[Button.inline("⬅️ رجوع", "show_main")]])
+            new_status = "off" if curr == "on" else "on"
+            db.set_setting(gid, "welcome_status", new_status)
+            await event.answer(f"✅ تم {'تفعيل' if new_status == 'on' else 'تعطيل'} الترحيب")
+            
+            # تحديث واجهة الإعدادات
+            w_status = "✅ مفعل" if new_status == "on" else "❌ معطل"
+            await event.edit("⚙️ **الإعدادات العامة للبوت:**", buttons=[
+                [Button.inline(f"نظام الترحيب: {w_status}", "tg_welcome")],
+                [Button.inline("⬅️ رجوع", "show_main")]
+            ])
+            
         else:
+            # تبديل حالة القفل (روابط، صور، الخ)
             current_l = db.is_locked(gid, feature)
             db.toggle_lock(gid, feature, 0 if current_l else 1)
-            await event.answer("⚙️ تم تغيير حالة القفل")
-            # تحديث الأزرار فوراً بنفس الطريقة
+            await event.answer("⚙️ تم تحديث حالة الحماية")
+            
+            # إعادة جلب الأزرار بالحالة الجديدة
             def get_s(f): return "🔒" if db.is_locked(gid, f) else "🔓"
             btns_updated = [
                 [Button.inline(f"{get_s('links')} الروابط", "tg_links"), Button.inline(f"{get_s('usernames')} المعرفات", "tg_usernames")],
@@ -61,29 +88,45 @@ async def callback_handler(event):
                 [Button.inline(f"{get_s('forward')} التوجيه", "tg_forward"), Button.inline(f"{get_s('videos')} الفيديوهات", "tg_videos")],
                 [Button.inline("⬅️ رجوع", "show_main")]
             ]
-            await event.edit("🔐 **إعدادات الحماية الفورية:**", buttons=btns_updated)
+            await event.edit("🔐 **إعدادات الحماية الفورية للمجموعة:**", buttons=btns_updated)
 
-    # --- رتب النظام (تحديث الوصف ليتناسب مع الهرم الجديد) ---
+    # --- عرض الرتب ---
     elif data == "show_ranks":
         ranks_text = (
-            "🎖️ **الهرم الإداري في Monopoly:**\n"
+            "🎖️ **الهرم الإداري المعتمد في Monopoly:**\n"
             "━━━━━━━━━━━━━━\n"
-            "👑 **المالك الأساسي (أنس):** حماية مطلقة وصلاحيات كاملة.\n"
-            "👑 **المالك:** يتحكم بالمدراء وتحت.\n"
-            "🎖️ **المدير:** يتحكم بالأدمن والمميز.\n"
-            "🛡️ **الأدمن:** تنفيذ العقوبات (كتم، طرد، حظر).\n"
-            "✨ **المميز:** محمي من بعض القيود التلقائية.\n"
+            "👑 **المطور (أنس):** صلاحيات مطلقة عابرة للمجموعات.\n"
+            "👑 **المالك:** التحكم الكامل في إعدادات المجموعة والمدراء.\n"
+            "🎖️ **المدير:** الوصول للوحة التحكم (هذه اللوحة).\n"
+            "🛡️ **الأدمن:** تنفيذ العقوبات الفورية (طرد، كتم).\n"
+            "✨ **المميز:** استثناء من فلاتر الحماية التلقائية.\n"
             "━━━━━━━━━━━━━━"
         )
         await event.edit(ranks_text, buttons=[[Button.inline("⬅️ رجوع", "show_main")]])
 
+    # --- عرض الأوامر ---
     elif data == "show_cmds":
-        # (بقاء نص الأوامر كما هو في ملفك الأصلي)
-        await event.edit(event.text, buttons=[[Button.inline("⬅️ العودة للقائمة", "show_main")]])
+        cmds_text = (
+            "📜 **دليل الأوامر الملكية:**\n"
+            "━━━━━━━━━━━━━━\n"
+            "• `رتبتي` - لعرض تفاصيلك.\n"
+            "• `المتفاعلين` - قائمة شرف المجموعة.\n"
+            "• `كشف` - (بالرد) لمعرفة بيانات عضو.\n"
+            "• `اضف رد` - لبرمجة ردود ذكية.\n"
+            "• `رفع / تنزيل` - لإدارة الرتب.\n"
+            "• `حظر / كتم` - لتنفيذ العقوبات.\n"
+            "━━━━━━━━━━━━━━"
+        )
+        await event.edit(cmds_text, buttons=[[Button.inline("⬅️ رجوع", "show_main")]])
 
+    # --- الإعدادات العامة ---
     elif data == "show_settings":
         w_status = "✅ مفعل" if db.get_setting(gid, "welcome_status") == "on" else "❌ معطل"
-        await event.edit("⚙️ **الإعدادات العامة للبوت:**", buttons=[[Button.inline(f"نظام الترحيب: {w_status}", "tg_welcome")],[Button.inline("⬅️ رجوع", "show_main")]])
+        await event.edit("⚙️ **الإعدادات العامة للبوت:**", buttons=[
+            [Button.inline(f"نظام الترحيب: {w_status}", "tg_welcome")],
+            [Button.inline("⬅️ رجوع", "show_main")]
+        ])
 
+    # --- إغلاق ---
     elif data == "close":
         await event.delete()
